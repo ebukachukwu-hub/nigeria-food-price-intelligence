@@ -1,0 +1,25 @@
+# Data files - raw/silver/gold stay local or move to cloud storage later
+data/raw/
+data/silver/
+data/gold/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Spark
+metastore_db/
+derby.log
+spark-warehouse/
+
+# OS/editor junk
+.DS_Store
+.vscode/
+*.log
+
+# Azure / secrets (once you get there)
+.env
+*.env
+config/secrets.yaml
