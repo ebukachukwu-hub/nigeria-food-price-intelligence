@@ -23,3 +23,5 @@ spark-warehouse/
 .env
 *.env
 config/secrets.yaml
+
+.pytest_cache
