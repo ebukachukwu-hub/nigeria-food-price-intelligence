@@ -80,73 +80,27 @@ commodity_columns = [
 ]
 
 
+import sys
+sys.path.append("../src")
+from transformations import build_coverage_lookup, explode_to_long
+
 # --------------------------------------------------
 # 5. Build commodity coverage lookup
-#    (market -> which commodities it ever records a price for)
 # --------------------------------------------------
 
-coverage_exprs = [
-    F.max(F.when(F.col(c).isNotNull(), 1).otherwise(0)).alias(c)
-    for c in commodity_columns
-]
-
-coverage_df = df.groupBy("mkt_name").agg(*coverage_exprs)
-
-# Rename flag columns to avoid collision with price columns after join
-coverage_renamed = coverage_df
-for c in commodity_columns:
-    coverage_renamed = coverage_renamed.withColumnRenamed(c, f"{c}_tracked")
-
+coverage_df = build_coverage_lookup(df, commodity_columns)
 
 # --------------------------------------------------
 # 6. Join coverage flags onto the raw data
 # --------------------------------------------------
 
-df_joined = df.join(coverage_renamed, on="mkt_name", how="left")
-
+df_joined = df.join(coverage_df, on="mkt_name", how="left")
 
 # --------------------------------------------------
-# 7. Convert wide commodity columns to long format,
-#    dropping (market, commodity) pairs that were never tracked
+# 7. Convert wide commodity columns to long format
 # --------------------------------------------------
 
-commodity_array = array(*[
-    struct(
-        col(c).alias("price"),
-        lit(c).alias("commodity"),
-        col(f"{c}_tracked").alias("tracked")
-    )
-    for c in commodity_columns
-])
-
-df_silver = (
-    df_joined
-    .select(
-        "date",
-        col("mkt_name").alias("market"),
-        col("adm1_name").alias("state"),
-        col("adm2_name").alias("lga"),
-        "currency",
-        col("lat").alias("latitude"),
-        col("lon").alias("longitude"),
-        explode(commodity_array).alias("commodity_data")
-    )
-    .select(
-        "date",
-        "market",
-        "state",
-        "lga",
-        "currency",
-        "latitude",
-        "longitude",
-        col("commodity_data.commodity").alias("commodity"),
-        col("commodity_data.price").alias("price"),
-        col("commodity_data.tracked").alias("tracked")
-    )
-    .filter(col("tracked") == 1)
-    .drop("tracked")
-)
-
+df_silver = explode_to_long(df_joined, commodity_columns)
 
 # --------------------------------------------------
 # 8. Clean commodity names
