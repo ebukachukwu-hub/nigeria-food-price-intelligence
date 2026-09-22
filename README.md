@@ -88,6 +88,29 @@ would fabricate observations that were never collected. Any future
 imputation will be flagged explicitly (e.g. `price_is_imputed`) rather
 than silently blended with real observations.
 
+## Key Findings
+
+The Gold layer surfaced a striking result: **milk in Yobe and Borno states
+shows by far the highest price volatility of any commodity/market
+combination in the dataset**, with a coefficient of variation between
+150% and 234% — well above every other commodity, and far above milk's
+already-high national CV of 127.7%.
+
+This aligns directly with the NULL investigation above: Yobe and Borno are
+also the states with the worst data coverage in the entire dataset. Taken
+together, this suggests that price volatility and data collection
+reliability both degrade in the same conflict-affected region — plausibly
+reflecting real supply disruption for a perishable good (milk has a short
+shelf life and depends on consistent local sourcing, unlike storable
+grains), compounded by inconsistent survey coverage in insecure areas.
+
+By contrast, the national volatility ranking shows a clear pattern:
+perishables (milk, CV 127.7%) and FAO-tracked staples exposed to broader
+market shocks (maize, sorghum) rank far more volatile than storable
+grains like beans, rice, and groundnuts (CV 72–75%) — consistent with
+what you'd expect economically, and a useful sanity check that the
+pipeline's numbers are behaviorally sound, not just structurally correct.
+
 ## Project Structure
 
 nigeria-food-price-intelligence/
@@ -98,20 +121,22 @@ nigeria-food-price-intelligence/
 │ └── gold/ # analytical tables
 │
 ├── Notebooks/
-│ ├── data_profiling.py # initial pandas inspection of raw data
-│ ├── silver_transformation.py # bronze -> silver, coverage-filtered
-│ └── null_investigation.py # missingness analysis by commodity/state/year
+│   ├── data_profiling.py         # initial pandas inspection of raw data
+│   ├── silver_transformation.py  # bronze -> silver, coverage-filtered
+│   ├── null_investigation.py     # missingness analysis by commodity/state/year
+│   └── gold_transformation.py    # silver -> gold, trend and volatility tables
 │
-├── sql/
 ├── src/
-├── tests/
-├── requirements.txt
-└── README.md
-# Status
+│   └── transformations.py        # reusable, tested transformation functions
+│
+├── Tests/
+│   └── test_transformations.py   # unit tests for Silver and Gold logic
+## Status
 
 - [x] Bronze ingestion
 - [x] Silver transformation (coverage-filtered long format)
 - [x] NULL investigation and root-cause analysis
-- [ ] Gold layer aggregations
+- [x] Gold layer aggregations (price trends, volatility by market, volatility nationally)
+- [x] Unit tests for Silver and Gold transformation logic
 - [ ] Azure Blob Storage + Databricks migration
 - [ ] SQL analytical queries
