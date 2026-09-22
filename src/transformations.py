@@ -57,3 +57,61 @@ def explode_to_long(df_joined: DataFrame, commodity_columns: list) -> DataFrame:
         .filter(col("tracked") == 1)
         .drop("tracked")
     )
+
+from pyspark.sql import functions as F
+
+
+def build_price_trends(df_silver):
+    """
+    Grain: (market, commodity, year)
+    Answers: which markets/states have higher prices; how prices change over time.
+    """
+    return (
+        df_silver
+        .withColumn("year", F.year("date"))
+        .groupBy("market", "state", "commodity", "year")
+        .agg(
+            F.avg("price").alias("avg_price")
+        )
+        .orderBy("market", "commodity", "year")
+    )
+
+
+def build_volatility_by_market(df_silver):
+    """
+    Grain: (market, commodity)
+    Answers: which market-commodity pairs are most volatile.
+    """
+    return (
+        df_silver
+        .groupBy("market", "state", "commodity")
+        .agg(
+            F.avg("price").alias("avg_price"),
+            F.stddev("price").alias("stddev_price")
+        )
+        .withColumn(
+            "coefficient_of_variation",
+            F.round((F.col("stddev_price") / F.col("avg_price")) * 100, 2)
+        )
+        .orderBy(F.col("coefficient_of_variation").desc())
+    )
+
+
+def build_volatility_national(df_silver):
+    """
+    Grain: (commodity)
+    Answers: which commodity is most volatile nationally, across all markets.
+    """
+    return (
+        df_silver
+        .groupBy("commodity")
+        .agg(
+            F.avg("price").alias("avg_price"),
+            F.stddev("price").alias("stddev_price")
+        )
+        .withColumn(
+            "coefficient_of_variation",
+            F.round((F.col("stddev_price") / F.col("avg_price")) * 100, 2)
+        )
+        .orderBy(F.col("coefficient_of_variation").desc())
+    )
