@@ -1,73 +1,59 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, make_date, explode, array, struct, lower, trim, lit
-from pyspark.sql import functions as F
+"""Silver (Parquet) -> Gold analytical tables."""
+
 import os
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
 
 os.environ["PYSPARK_PYTHON"] = sys.executable
 os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
-sys.path.append("../src")
-from transformations import (
-    build_coverage_lookup,
-    explode_to_long,
-    build_price_trends,
-    build_volatility_by_market,
-    build_volatility_national
+from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import functions as F  # noqa: E402
+from local_io import clear_local_output  # noqa: E402
+from transformations import (  # noqa: E402
+    build_price_trends, build_volatility_by_market, build_volatility_national,
 )
+
+SILVER_PATH = ROOT / "data" / "silver" / "food_prices"
+GOLD_PATH = ROOT / "data" / "gold"
+
+# Analysis settings. These are judgement calls: state them in the README and
+# check whether the rankings change when you vary them.
+PRICE_COL = "price_observed"   # or "price_estimated"
+START = "2020-01-01"           # common window for every series
+MIN_RETURNS = 24               # minimum consecutive-month returns per pair
 
 spark = (
     SparkSession.builder
-    .appName("Nigeria Food Price Gold Transformation")
+    .appName("Nigeria Food Price Gold")
     .master("local[*]")
+    .config("spark.sql.shuffle.partitions", "8")
     .getOrCreate()
 )
 
-# --------------------------------------------------
-# Rebuild df_silver
-# --------------------------------------------------
+silver = spark.read.parquet(str(SILVER_PATH))
 
-input_path = "../data/raw/NGA_RTFP_mkt_2007_2026-08-24.csv"
+price_trends = build_price_trends(silver, PRICE_COL)
+vol_market = build_volatility_by_market(silver, PRICE_COL, START, MIN_RETURNS).cache()
+vol_national = build_volatility_national(vol_market)
 
-df = spark.read.option("header", True).option("inferSchema", True).csv(input_path)
-df = df.withColumn("date", make_date(col("year"), col("month"), lit(1)))
+print(f"\nSettings: price={PRICE_COL}, start={START}, min_returns={MIN_RETURNS}")
 
-commodity_columns = [
-    "beans", "eggs", "fish", "gari_fao", "groundnuts", "maize_fao",
-    "maize_flour", "meat_beef", "meat_goat", "milk", "millet",
-    "onions", "rice", "rice_fao", "sorghum_fao", "yam"
-]
+print("\nVolatility by market (top 20)")
+vol_market.orderBy(F.desc("volatility")).show(20, truncate=False)
 
-coverage_df = build_coverage_lookup(df, commodity_columns)
-df_joined = df.join(coverage_df, on="mkt_name", how="left")
-df_silver = explode_to_long(df_joined, commodity_columns)
-df_silver = df_silver.withColumn("commodity", lower(trim(col("commodity"))))
+print("\nVolatility national (median across markets)")
+vol_national.orderBy(F.desc("median_volatility")).show(truncate=False)
 
-# --------------------------------------------------
-# Build Gold tables
-# --------------------------------------------------
+for name, table in [("price_trends", price_trends),
+                    ("volatility_by_market", vol_market),
+                    ("volatility_national", vol_national)]:
+    clear_local_output(GOLD_PATH / name)
+    table.write.mode("overwrite").parquet(str(GOLD_PATH / name))
 
-gold_price_trends = build_price_trends(df_silver)
-gold_volatility_by_market = build_volatility_by_market(df_silver)
-gold_volatility_national = build_volatility_national(df_silver)
-
-print("\nGold: Price Trends (sample)")
-gold_price_trends.show(20)
-
-print("\nGold: Volatility by Market (top 20 most volatile)")
-gold_volatility_by_market.show(20, truncate=False)
-
-print("\nGold: Volatility National (all commodities, most volatile first)")
-gold_volatility_national.show(20, truncate=False)
-
-# --------------------------------------------------
-# Write Gold tables to disk
-# --------------------------------------------------
-
-gold_price_trends.write.mode("overwrite").parquet("../data/gold/price_trends")
-gold_volatility_by_market.write.mode("overwrite").parquet("../data/gold/volatility_by_market")
-gold_volatility_national.write.mode("overwrite").parquet("../data/gold/volatility_national")
-
-print("\nGold tables written to data/gold/")
+print(f"\nGold tables written to {GOLD_PATH}")
 
 spark.stop()
