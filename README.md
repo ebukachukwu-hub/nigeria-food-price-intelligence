@@ -1,142 +1,190 @@
-# Nigeria Cost-of-Living & Food Price Intelligence Pipeline
+# Nigeria Food Price Intelligence Pipeline
 
-A data engineering pipeline that transforms the World Bank's Real Time Food
-Prices dataset for Nigeria into an analysis-ready format, built to answer
-questions like:
+A PySpark pipeline that turns the World Bank's Real Time Food Prices dataset
+for Nigeria into validated, analysis-ready tables, and uses them to measure
+food price volatility across markets.
 
-- Which food commodities are experiencing the largest price changes?
-- Which markets/states have higher prices?
-- How do prices change over time?
-- Which commodities show the greatest volatility?
+The most useful thing it found was not a volatility ranking but a data quality
+problem: a monitoring round in which milk prices across 20 Borno markets were
+reported at roughly 5% of their normal level.
 
 ## Data Source
 
-[World Bank Real Time Food Prices — Nigeria](https://microdata.worldbank.org/catalog/4503/data-api)
+[World Bank Real Time Food Prices, Nigeria](https://microdata.worldbank.org/catalog/4503)
 (`NGA_RTFP_mkt_2007_2026-08-24.csv`)
 
-- 73 markets, monthly estimates from January 2007 to August 2026
-- 17,464 market-level observations, 137 variables
-- Compiled from WFP, FAO, and national statistical office sources, with
-  ML-based estimation for missing prices
-- Commodities tracked include beans, eggs, fish, gari, maize, meat, milk,
-  millet, onions, rice, sorghum, and yam
+- 73 markets, monthly, January 2007 to August 2026
+- 17,464 rows, 137 variables
+- Compiled by the World Bank from WFP, FAO and national statistical office
+  sources, with machine learning estimation of missing prices
 
-Raw data is not committed to this repo (see `.gitignore`). To reproduce:
-visit the link above, scroll down to the **Bulk Data Downloads** table,
-and download the Nigeria market-level CSV (`NGA_RTFP_mkt_*.csv`). Place
-it in `data/raw/`.
+For each commodity the file carries several columns. This pipeline uses three:
+
+| Column | Meaning | Used as |
+|---|---|---|
+| `beans` | price as reported | `price_observed` |
+| `c_beans` | World Bank model's close estimate | `price_estimated` |
+| `trust_beans` | World Bank trust score | `trust` |
+
+The raw data is not committed. To reproduce, download the Nigeria
+market-level CSV from the Bulk Data Downloads table on the page above and
+place it in `data/raw/`.
 
 ## Architecture
+
+```
 World Bank CSV
-│
-▼
-┌─────────────┐
-│ BRONZE │ Raw ingestion, untouched
-└──────┬──────┘
-│
-▼
-┌─────────────┐
-│ SILVER │ Cleaned, validated, long/tidy format
-└──────┬──────┘
-│
-▼
-┌─────────────┐
-│ GOLD │ Analytical tables (in progress)
-└─────────────┘
+      |
+      v
+  BRONZE   raw CSV, read as text, then typed explicitly
+      |
+      v
+  SILVER   long format, validated, spikes flagged     data/silver/food_prices
+      |
+      v
+  GOLD     price trends and volatility tables          data/gold/
+```
 
-
-Planned: Azure Blob Storage → Databricks → Delta Lake for the cloud version
-of this pipeline.
+Each layer is written to Parquet and the next layer reads it from disk.
+Planned: Azure Data Lake Storage and Databricks, with each layer as a Delta table.
 
 ## Key Engineering Decisions
 
-**Grain of the Silver table:** one row = one commodity's price in one
-market at one point in time (long/tidy format), rather than one row per
-market-month with 16 separate commodity columns. This makes filtering,
-aggregation, and time-series analysis dramatically simpler.
+**Silver grain.** One row is one commodity in one market in one month, keyed
+on `geo_id`, the source's market identifier. Every run checks that no key
+appears twice.
 
-**Handling missing prices — a two-stage investigation:**
+**Observed prices, not model estimates.** Observed prices are 79% to 93% empty
+in the raw file; the model estimates are 100% complete. Where both exist, the
+model changes the observed price in roughly 10% to 17% of cases, sometimes
+heavily. Analysing the estimates would mean analysing the model's view of the
+market. Silver keeps both side by side, and Gold states which one it uses.
 
-Naively pivoting all 16 commodity columns into long format for every
-market produced NULL rates of 78–99% across nearly every commodity, state,
-and year — suspiciously uniform, which pointed to a structural problem
-rather than genuine missing data.
+**Coverage bounded by each series' own history.** A (market, commodity) pair
+only has rows between its first and last observed month. An earlier version
+kept every month from 2007 for any commodity a market ever reported, which
+created rows for years before the market was surveyed. Bounding the window
+reduced Silver from 164,964 rows to 44,112, and 80.2% of the remaining rows
+have an observed price. Gaps inside a series stay as NULL; nothing is imputed.
 
-Investigation confirmed it: **most markets in this dataset only track a
-subset of the 16 commodities** (commonly a fixed set of ~12, or a
-different FAO-specific set of ~5), not all 16. The initial wide-to-long
-transformation was blindly exploding all 16 commodities onto every
-market, fabricating rows for commodity/market combinations that were
-never surveyed in the first place.
+**Volatility from monthly changes, not price levels.** Volatility is the
+standard deviation of month-on-month log price changes, from January 2020,
+using consecutive months only, for series with at least 24 such changes.
+An earlier version used the coefficient of variation of price levels over the
+full period. That mostly measured inflation: a unit test shows a price rising
+a steady 10% a month scores zero volatility under the current method and over
+100% under the old one.
 
-**Fix:** a coverage lookup was built (per market, which commodities does
-it ever record a non-null price for, across the full time series), joined
-onto the raw data, and used to filter the exploded rows — so the Silver
-table only contains (market, commodity) pairs that genuinely exist in the
-source. This dropped the exploded row count from 279,424 to 164,964.
+**Spikes are flagged, not deleted.** A price at least 3 times higher or lower
+than both its previous and next observed prices (within two months) is marked
+`price_is_spike` in Silver and excluded from volatility in Gold. A price that
+jumps and stays at the new level is not flagged.
 
-After the fix, remaining NULLs (78.5% overall) show a real, explainable
-pattern instead of uniform noise:
-- Sharply higher in 2007–2015 (~95–99%) vs. 2017 onward (~50–60%),
-  consistent with the data collection network expanding over time
-- Concentrated in Sokoto, Adamawa, Borno, and Yobe — Nigeria's
-  conflict-affected northeast — suggesting data collection reliability
-  correlates with regional insecurity rather than random gaps
+## Findings
 
-These NULLs are preserved as-is rather than imputed, since replacing them
-would fabricate observations that were never collected. Any future
-imputation will be flagged explicitly (e.g. `price_is_imputed`) rather
-than silently blended with real observations.
+### 1. A reporting anomaly in the December 2025 milk round
 
-## Key Findings
+In December 2025, 20 Borno markets report milk at ₦150 to ₦871, against
+₦2,877 to ₦5,424 in the World Bank's estimates and similar levels in the
+surrounding months. The same month, commodity and direction across one
+state points to a change in what was recorded for that round, such as a
+smaller unit, rather than to 20 separate errors. This has not been confirmed
+against the underlying surveys.
 
-The Gold layer surfaced a striking result: **milk in Yobe and Borno states
-shows by far the highest price volatility of any commodity/market
-combination in the dataset**, with a coefficient of variation between
-150% and 234% — well above every other commodity, and far above milk's
-already-high national CV of 127.7%.
+Smaller clusters appear in May 2017 (5 markets, milk, upward) and August
+2017 (3 markets, fish). Across all commodities, 62 observed prices are
+flagged.
 
-This aligns directly with the NULL investigation above: Yobe and Borno are
-also the states with the worst data coverage in the entire dataset. Taken
-together, this suggests that price volatility and data collection
-reliability both degrade in the same conflict-affected region — plausibly
-reflecting real supply disruption for a perishable good (milk has a short
-shelf life and depends on consistent local sourcing, unlike storable
-grains), compounded by inconsistent survey coverage in insecure areas.
+This matters for analysis: before spike handling, a single one of these
+entries made Monguno milk the most volatile series in the dataset. With that
+one month removed, its volatility falls from 0.84 to 0.09.
 
-By contrast, the national volatility ranking shows a clear pattern:
-perishables (milk, CV 127.7%) and FAO-tracked staples exposed to broader
-market shocks (maize, sorghum) rank far more volatile than storable
-grains like beans, rice, and groundnuts (CV 72–75%) — consistent with
-what you'd expect economically, and a useful sanity check that the
-pipeline's numbers are behaviorally sound, not just structurally correct.
+### 2. Milk, fish and onions are the most volatile group
+
+| Commodity | Median volatility (default settings) |
+|---|---|
+| milk | 0.368 |
+| onions | 0.299 |
+| fish | 0.299 |
+| yam | 0.188 |
+| maize flour | 0.175 |
+| beans | 0.175 |
+| ... | ... |
+| rice | 0.090 |
+| rice (FAO series) | 0.056 |
+
+These three are the top three under every setting tested: no spike
+removal, spike thresholds of 2x, 3x and 5x, a window starting in 2022, and a
+lower minimum of 12 monthly changes. Their order within the group is not
+stable. Milk ranks first in five of six settings but third when shorter
+series are included, so this project does not claim milk is the single most
+volatile commodity.
+
+### 3. The ranking describes the northeast, not Nigeria
+
+Every qualifying market for milk, fish, onions, beans, eggs, groundnuts and
+meat is in the northeast (Borno, Yobe or Adamawa). The ranking above is therefore a ranking of the
+northeast monitoring network. Only yam, millet and rice have enough markets
+elsewhere to compare regions:
+
+| Commodity | Northeast (median) | Rest of Nigeria (median) |
+|---|---|---|
+| rice | 0.109 (19 markets) | 0.055 (9 markets) |
+| millet | 0.151 (27 markets) | 0.107 (11 markets) |
+| yam | 0.189 (25 markets) | 0.182 (10 markets) |
+
+Rice and millet are more volatile in the northeast; yam is not. This is
+consistent with, but does not demonstrate, an effect of insecurity on
+markets.
+
+## How to Run
+
+From the project root:
+
+```
+python -m pip install -r requirements.txt
+python -m pytest Tests -v
+python Notebooks/silver_transformation.py
+python Notebooks/gold_transformation.py
+```
+
+Supporting checks, which read the saved tables and write nothing:
+
+```
+python Notebooks/observed_vs_estimated_check.py
+python Notebooks/milk_finding_checks.py
+python Notebooks/sensitivity_checks.py
+```
 
 ## Project Structure
 
+```
 nigeria-food-price-intelligence/
-│
-├── data/
-│ ├── raw/ # source CSV (not committed)
-│ ├── silver/ # cleaned, long-format data
-│ └── gold/ # analytical tables
-│
+├── data/                      (not committed)
+│   ├── raw/                   source CSV
+│   ├── silver/                written by silver_transformation.py
+│   └── gold/                  written by gold_transformation.py
 ├── Notebooks/
-│   ├── data_profiling.py         # initial pandas inspection of raw data
-│   ├── silver_transformation.py  # bronze -> silver, coverage-filtered
-│   ├── null_investigation.py     # missingness analysis by commodity/state/year
-│   └── gold_transformation.py    # silver -> gold, trend and volatility tables
-│
+│   ├── silver_transformation.py
+│   ├── gold_transformation.py
+│   ├── observed_vs_estimated_check.py
+│   ├── milk_finding_checks.py
+│   └── sensitivity_checks.py
 ├── src/
-│   └── transformations.py        # reusable, tested transformation functions
-│
-├── Tests/
-│   └── test_transformations.py   # unit tests for Silver and Gold logic
+│   ├── transformations.py     all transformation logic
+│   └── local_io.py            local output handling (Windows)
+└── Tests/
+    ├── conftest.py
+    └── test_transformations.py   19 tests
+```
+
 ## Status
 
-- [x] Bronze ingestion
-- [x] Silver transformation (coverage-filtered long format)
-- [x] NULL investigation and root-cause analysis
-- [x] Gold layer aggregations (price trends, volatility by market, volatility nationally)
-- [x] Unit tests for Silver and Gold transformation logic
-- [ ] Azure Blob Storage + Databricks migration
-- [ ] SQL analytical queries
+- [x] Bronze to Silver with explicit typing and validation
+- [x] Silver persisted to Parquet, Gold reads from it
+- [x] Returns-based volatility with spike handling
+- [x] Sensitivity checks on the main findings
+- [x] 19 unit tests
+- [ ] Confirm the December 2025 anomaly against source survey data
+- [ ] Automated test runs on each pull request (GitHub Actions)
+- [ ] Azure Data Lake Storage and Databricks migration
