@@ -32,21 +32,28 @@ place it in `data/raw/`.
 
 ## Architecture
 
+The pipeline runs in two places from the same transformation code
+(`src/transformations.py`):
+
 ```
-World Bank CSV
-      |
-      v
-  BRONZE   raw CSV, read as text, then typed explicitly
-      |
-      v
-  SILVER   long format, validated, spikes flagged     data/silver/food_prices
-      |
-      v
-  GOLD     price trends and volatility tables          data/gold/
+                  LOCAL                        DATABRICKS (Free Edition)
+
+Source            data/raw/*.csv               Unity Catalog volume
+                        |                              |
+BRONZE            (the CSV itself)             bronze_food_prices
+                        |                      Delta, all columns as text,
+                        |                      plus _source_file, _ingested_at
+                        |                              |
+SILVER            data/silver (Parquet)        silver_food_prices (Delta)
+                        |                              |
+GOLD              data/gold (Parquet)          gold_* tables (Delta)
 ```
 
-Each layer is written to Parquet and the next layer reads it from disk.
-Planned: Azure Data Lake Storage and Databricks, with each layer as a Delta table.
+Local runs are for development and testing. On Databricks, each layer is a
+Delta table in Unity Catalog (`workspace.nigeria_food`), and each layer reads
+the previous one from its saved table. Both runs produce identical results:
+44,112 Silver rows, 62 flagged spikes, and the same volatility figures to full
+precision.
 
 ## Key Engineering Decisions
 
@@ -156,6 +163,16 @@ python Notebooks/milk_finding_checks.py
 python Notebooks/sensitivity_checks.py
 ```
 
+On Databricks Free Edition:
+
+1. Create the schema and volume:
+   `CREATE SCHEMA IF NOT EXISTS workspace.nigeria_food;`
+   `CREATE VOLUME IF NOT EXISTS workspace.nigeria_food.raw;`
+2. Upload the CSV to the `raw` volume.
+3. Clone this repository into the workspace as a Git folder.
+4. Run `databricks/01_bronze`, `02_silver` and `03_gold` in order on
+   serverless compute.
+
 ## Project Structure
 
 ```
@@ -164,7 +181,11 @@ nigeria-food-price-intelligence/
 │   ├── raw/                   source CSV
 │   ├── silver/                written by silver_transformation.py
 │   └── gold/                  written by gold_transformation.py
-├── Notebooks/
+├── databricks/                Databricks notebooks (Delta tables)
+│   ├── 01_bronze.py
+│   ├── 02_silver.py
+│   └── 03_gold.py
+├── Notebooks/                 local pipeline and checks
 │   ├── silver_transformation.py
 │   ├── gold_transformation.py
 │   ├── observed_vs_estimated_check.py
@@ -173,9 +194,10 @@ nigeria-food-price-intelligence/
 ├── src/
 │   ├── transformations.py     all transformation logic
 │   └── local_io.py            local output handling (Windows)
-└── Tests/
-    ├── conftest.py
-    └── test_transformations.py   19 tests
+├── Tests/
+│   ├── conftest.py
+│   └── test_transformations.py   19 tests
+└── requirements.txt
 ```
 
 ## Status
@@ -185,6 +207,7 @@ nigeria-food-price-intelligence/
 - [x] Returns-based volatility with spike handling
 - [x] Sensitivity checks on the main findings
 - [x] 19 unit tests
+- [x] Databricks Free Edition: Bronze, Silver and Gold as Delta tables,
+      results verified against the local run
+- [ ] Automated test runs on each push and pull request (GitHub Actions)
 - [ ] Confirm the December 2025 anomaly against source survey data
-- [ ] Automated test runs on each pull request (GitHub Actions)
-- [ ] Azure Data Lake Storage and Databricks migration
